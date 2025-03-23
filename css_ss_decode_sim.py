@@ -77,8 +77,9 @@ class css_ss_decode_sim:
             "tqdm_disable": 0,
             "run_sim": 1,
             "channel_update": "x->z",
-            "hadamard_rotate": 0,
-            "hadamard_rotate_sector1_length": 0,
+            "sector_list": [0, 1, 2],
+            "rotated_sectors": [],
+            "sector_lengths": {0:0, 1:0, 2:0},
             "error_bar_precision_cutoff": 1e-3,
         }
 
@@ -453,9 +454,10 @@ class css_ss_decode_sim:
         """
         Sets up the error channels from the error rate and error bias input parameters
         """
-
-        xyz_error_bias = np.array(self.xyz_error_bias)
-        if xyz_error_bias[0] == np.inf:
+    
+        # SET UP ERR RATE FOR EACH PAULI (DEPENDING ON BIAS):
+        xyz_error_bias = np.array(self.xyz_error_bias)  # take in the tuple with (xbias, ybias, zbias)
+        if xyz_error_bias[0] == np.inf:                 # if infinite bias, that Pauli is the whole err rate (everything else = 0)
             self.px = self.error_rate
             self.py = 0
             self.pz = 0
@@ -467,30 +469,36 @@ class css_ss_decode_sim:
             self.px = 0
             self.py = 0
             self.pz = self.error_rate
-        else:
+        else:                                           # otherwise, each Pauli gets the proportional error prob
             self.px, self.py, self.pz = (
                 self.error_rate * xyz_error_bias / np.sum(xyz_error_bias)
             )
-
-        if self.hadamard_rotate == 0:
-            self.channel_probs_x = np.ones(self.N) * (self.px)
-            self.channel_probs_z = np.ones(self.N) * (self.pz)
-            self.channel_probs_y = np.ones(self.N) * (self.py)
-
-        elif self.hadamard_rotate == 1:
-            n1 = self.hadamard_rotate_sector1_length
-            self.channel_probs_x = np.hstack(
-                [np.ones(n1) * (self.px), np.ones(self.N - n1) * (self.pz)]
-            )
-            self.channel_probs_z = np.hstack(
-                [np.ones(n1) * (self.pz), np.ones(self.N - n1) * (self.px)]
-            )
-            self.channel_probs_y = np.ones(self.N) * (self.py)
+    
+        # SET UP CHANNEL PROBS (DEPENDING ON H ROT)
+        if not self.rotated_sectors:       
+            # No sectors are rotated → apply uniform px, pz
+            self.channel_probs_x = np.ones(self.N) * self.px
+            self.channel_probs_z = np.ones(self.N) * self.pz
+            self.channel_probs_y = np.ones(self.N) * self.py
+        
         else:
-            raise ValueError(
-                f"The hadamard rotate attribute should be set to 0 or 1. Not '{self.hadamard_rotate}"
-            )
-
+            # Some sectors are rotated → build channel_probs accordingly
+            x_probs, z_probs = [], []
+            for i in range(len(self.sector_lengths)):  # supports any number of sectors
+                n = self.sector_lengths[i]
+                if i in self.rotated_sectors:
+                    # Hadamard-rotated sector: swap px ↔ pz
+                    x_probs.append(np.ones(n) * self.pz)
+                    z_probs.append(np.ones(n) * self.px)
+                else:
+                    # Unrotated sector: standard assignment
+                    x_probs.append(np.ones(n) * self.px)
+                    z_probs.append(np.ones(n) * self.pz)
+        
+            self.channel_probs_x = np.hstack(x_probs)
+            self.channel_probs_z = np.hstack(z_probs[::-1]) # mirror, due to mirrored sector structure for Hz
+            self.channel_probs_y = np.ones(self.N) * self.py
+    
         self.channel_probs_x.setflags(write=False)
         self.channel_probs_y.setflags(write=False)
         self.channel_probs_z.setflags(write=False)
