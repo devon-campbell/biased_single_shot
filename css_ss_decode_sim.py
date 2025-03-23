@@ -51,10 +51,7 @@ class css_ss_decode_sim:
         cluster, it is recommend to disable tqdm.
     run_sim: bool
         If enabled (default), the simulation will start automatically.
-    hadamard_rotate: bool
-        Toggle Hadamard rotate. ON: 1; OFF; 0
-    hadamard_rotate_sector1_length: int
-        Specifies the number of qubits in sector 1 for the Hadamard rotation.
+
     error_bar_precision_cutoff: float
         The simulation will stop after this precision is reached.
     """
@@ -80,6 +77,7 @@ class css_ss_decode_sim:
             "sector_list": [0, 1, 2],
             "rotated_sectors": [],
             "sector_lengths": {0:0, 1:0, 2:0},
+            "p_meas_err": 0,
             "error_bar_precision_cutoff": 1e-3,
         }
 
@@ -142,6 +140,8 @@ class css_ss_decode_sim:
         # the hx, hx, mx, mz matrices
         self.hx = scipy.sparse.csr_matrix(hx).astype(np.uint8)
         self.hz = scipy.sparse.csr_matrix(hz).astype(np.uint8)
+
+        print(type(mx))
         self.mx = scipy.sparse.csr_matrix(mx).astype(np.uint8)
         self.mz = scipy.sparse.csr_matrix(mz).astype(np.uint8)
         self.N = self.hz.shape[1]  # the block length
@@ -218,17 +218,17 @@ class css_ss_decode_sim:
         self.error_x, self.error_z = self._generate_error()
     
         # 2) Compute the *ideal* data syndromes
-        #    (Using the 4D h_z / h_x that you built)
-        synd_x_ideal = (h_z @ self.error_x) % 2
-        synd_z_ideal = (h_x @ self.error_z) % 2
+        #    (Using the 4D hz / hx that you built)
+        synd_x_ideal = (self.hz @ self.error_x) % 2
+        synd_z_ideal = (self.hx @ self.error_z) % 2
     
         # 3) Add measurement noise
-        synd_x_noisy = (synd_x_ideal + np.random.binomial(1, p_meas_synd, size=len(synd_x_ideal))) % 2
-        synd_z_noisy = (synd_z_ideal + np.random.binomial(1, p_meas_synd, size=len(synd_z_ideal))) % 2
+        synd_x_noisy = (synd_x_ideal + np.random.binomial(1, self.p_meas_err, size=len(synd_x_ideal))) % 2
+        synd_z_noisy = (synd_z_ideal + np.random.binomial(1, self.p_meas_err, size=len(synd_z_ideal))) % 2
     
-        # 4) Form meta-syndrome by measuring the noisy syndrome using m_x / m_z:
-        meta_synd_x = (m_x @ synd_x_noisy) % 2
-        meta_synd_z = (m_z @ synd_z_noisy) % 2
+        # 4) Form meta-syndrome by measuring the noisy syndrome using mx / mz:
+        meta_synd_x = (self.mx @ synd_x_noisy) % 2
+        meta_synd_z = (self.mz @ synd_z_noisy) % 2
     
         # 5) Decode the meta-syndrome to find which measurement bits are flipped
         #    (i.e. run the "measurement" decoders)
@@ -505,12 +505,13 @@ class css_ss_decode_sim:
 
     def _decoder_setup(self):
         """
-        Setup for the BP+OSD decoders
+        Setup for the BP+OSD decoders for data errors *and* measurement errors.
         """
-
+    
         self.ms_scaling_factor = float(self.ms_scaling_factor)
-
-        # decoder for Z errors
+    
+        # --- 1) Data-error decoders ---
+        # For Z errors, we use hx:
         self.bpd_z = BpOsdDecoder(
             self.hx,
             channel_probs=self.channel_probs_z + self.channel_probs_y,
@@ -520,8 +521,7 @@ class css_ss_decode_sim:
             osd_method=self.osd_method,
             osd_order=self.osd_order,
         )
-
-        # decoder for X-errors
+        # For X errors, we use hz:
         self.bpd_x = BpOsdDecoder(
             self.hz,
             channel_probs=self.channel_probs_x + self.channel_probs_y,
@@ -531,6 +531,33 @@ class css_ss_decode_sim:
             osd_method=self.osd_method,
             osd_order=self.osd_order,
         )
+    
+        # --- 2) Measurement-error decoders (new!) ---
+        # Only define them if mx/mz are provided & not empty
+        if self.mx is not None and self.mx.shape[0] != 0:
+            # Here, channel_probs for measurement errors can be uniform:
+            meas_err_probs_x = np.ones(self.mx.shape[1]) * self.p_meas_err
+            self.bpd_meas_x = BpOsdDecoder(
+                self.mx,
+                channel_probs=meas_err_probs_x,
+                max_iter=self.max_iter,
+                bp_method=self.bp_method,
+                ms_scaling_factor=self.ms_scaling_factor,
+                osd_method=self.osd_method,
+                osd_order=self.osd_order
+            )
+    
+        if self.mz is not None and self.mz.shape[0] != 0:
+            meas_err_probs_z = np.ones(self.mz.shape[1]) * self.p_meas_err
+            self.bpd_meas_z = BpOsdDecoder(
+                self.mz,
+                channel_probs=meas_err_probs_z,
+                max_iter=self.max_iter,
+                bp_method=self.bp_method,
+                ms_scaling_factor=self.ms_scaling_factor,
+                osd_method=self.osd_method,
+                osd_order=self.osd_order
+            )
 
     def _generate_error(self):
         """
@@ -588,6 +615,7 @@ class css_ss_decode_sim:
 
         for self.run_count in pbar:
             self._single_run_ss()
+            # self._single_run()
 
             pbar.set_description(
                 f"d_max: {self.min_logical_weight}; OSDW_WER: {self.osdw_word_error_rate*100:.3g}±{self.osdw_word_error_rate_eb*100:.2g}%; OSDW: {self.osdw_logical_error_rate*100:.3g}±{self.osdw_logical_error_rate_eb*100:.2g}%; OSD0: {self.osd0_logical_error_rate*100:.3g}±{self.osd0_logical_error_rate_eb*100:.2g}%;"

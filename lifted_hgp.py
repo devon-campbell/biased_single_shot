@@ -51,37 +51,29 @@ class lifted_hgp(css_code):
         # For reference, Hx has shape (a_m*b_n, ?) and Hz has shape (a_n*b_m, ?)
         # The details depend on how you stack/transpose, but that’s normal for HGP code.
 
-        # ---------- 2) Interpret them as the 2D boundary maps ----------
-        # We'll call:
-        #   delta_m1_2d = hx_proto
-        #   delta_0_2d  = hz_proto
-        delta_m1_2d = self.hx_proto.T.to_binary(lift_parameter=self.lift_parameter)
-        delta_0_2d  = self.hz_proto.to_binary(lift_parameter=self.lift_parameter)
+        # ---------- 2) Interpret Hx and Hz (protographs) as binary 2D boundary maps ----------
+        # build_2d_matrices(delta0) function
+        delta_m1_2d = self.hx_proto.T.to_binary(self.lift_parameter)
+        delta_0_2d  = self.hz_proto.to_binary(self.lift_parameter)
         print(delta_m1_2d)
         print(delta_0_2d)
 
-        # ---------- 3) Build the 4D product (Eqs. (58)–(61)) ----------
-        # Let delta_0_2d be shape (k, j).  We'll do exactly what your
-        # build_4d_matrices function does, using k, j for the row/column counts.
+        # ---------- 3) Build the 4D product (Eqs. (58)–(61)) ---------- 
+        # build_4d_matrices(delta_m1_2d, delta_0_2d) function
         k, j = delta_0_2d.shape
         print(f'delta_0_2d.shape: {delta_0_2d.shape}')
         print(f'delta_m1_2d.shape: {delta_m1_2d.shape}')
 
         # (58)  mz = δ_{-2}
-        #     = [  I(k) ⊗ delta_0_2d^T ]
-        #       [  delta_m1_2d ⊗ I(k) ]
-
         self.mz_4d = (
             np.vstack([
                 np.kron(I(k), delta_0_2d.T),
                 np.kron(delta_m1_2d, I(k))
             ])
         )
-        print(self.mz_4d)
-        print(type(self.mz_4d))
+
 
         # (59)  hz_4d = δ_{-1}^{(new)}
-        #   It's a (3×2) block structure in your code:
         top_left  = np.kron(I(k), delta_m1_2d.T)
         top_right = np.zeros_like(top_left)
 
@@ -96,11 +88,10 @@ class lifted_hgp(css_code):
             [mid_left,  mid_right],
             [bot_left,  bot_right]
         ]))
-        print((np.block([
-            [top_left,  top_right],
-            [mid_left,  mid_right],
-            [bot_left,  bot_right]
-        ])))
+        
+        self.hz_1_4d = np.hstack([top_left.T, top_right.T])
+        self.hz_2_4d = np.hstack([mid_left.T, mid_right.T])
+        self.hz_3_4d = np.hstack([bot_left.T, bot_right.T])
 
         # (60)  hx_4d = δ_{0}^{(new)}
         top_left  = np.kron(delta_m1_2d, I(k))
@@ -118,13 +109,21 @@ class lifted_hgp(css_code):
             ])
         )
 
-        # (61)  mx_4d = δ_{1}^{(new)}
+        self.hx_1_4d = np.block([top_left, bot_left])
+        self.hx_2_4d = np.block([top_mid, bot_mid])
+        self.hx_3_4d = np.block([top_right, bot_right])
+
+        # (61)  mx_4d = δ_{1}
         self.mx_4d = (
             np.hstack([
                 np.kron(delta_0_2d, I(k)),
                 np.kron(I(k), delta_m1_2d.T)  
             ])
         )
+        
+        self.h_4d = np.hstack([self.hx_1_4d, self.hx_2_4d, self.hx_3_4d,
+                               self.hz_1_4d, self.hz_2_4d, self.hz_3_4d])
+        self.sector_lengths = {0:self.hx_1_4d.shape[1], 1:self.hx_2_4d.shape[1], 2:self.hx_3_4d.shape[1]}
 
         super().__init__(self.hx_proto.to_binary(lift_parameter),self.hz_proto.to_binary(lift_parameter))
 
@@ -135,17 +134,18 @@ class lifted_hgp(css_code):
         return pt.hstack([px,pz])
 
     @property
-    def hx1(self):
+    def hx1_2d(self):
         return self.hx1_proto.to_binary(self.lift_parameter)
     @property
-    def hx2(self):
+    def hx2_2d(self):
         return self.hx2_proto.to_binary(self.lift_parameter)
     @property
-    def hz1(self):
+    def hz1_2d(self):
         return self.hz1_proto.to_binary(self.lift_parameter)
     @property
-    def hz2(self):
+    def hz2_2d(self):
         return self.hz2_proto.to_binary(self.lift_parameter)
+
 
 
 class bias_tailored_lifted_product(stab_code):
