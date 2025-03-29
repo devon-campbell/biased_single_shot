@@ -128,7 +128,7 @@ class lifted_hgp_4d(css_code):
         self.lift_parameter = lift_parameter
         
         # Store the protographs in GF(2) form:
-        self.a = a
+        self.a=a
         self.b=b
         self.c=c
         self.d=d
@@ -141,7 +141,7 @@ class lifted_hgp_4d(css_code):
         self.hx_proto=pt.hstack([self.hx1_proto, self.hx2_proto])
         self.hx = self.hx_proto.to_binary(lift_parameter)
         
-        mz = self.mz_proto.to_binary(lift_parameter)        
+        self.mz = self.mz_proto.to_binary(lift_parameter)        
         self.mx = self.mx_proto.to_binary(lift_parameter)
     
         super().__init__(self.hx_proto.to_binary(lift_parameter),self.hz_proto.to_binary(lift_parameter))
