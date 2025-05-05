@@ -15,7 +15,7 @@ if not log.handlers:                       # avoid duplicate handlers
     fmt = "[%(asctime)s] [%(levelname)s] %(message)s"
     h.setFormatter(logging.Formatter(fmt))
     log.addHandler(h)
-    log.setLevel(logging.WARNING)          # default: silent
+    log.setLevel(logging.INFO)          # default: silent
 # ----------------------------------------------------------------------
 
 # Module-level zero matrix cache
@@ -44,6 +44,12 @@ def save_matrix(proto, key, codename):
 
 def load_matrix(label, codename):
     return np.load(f"codes/{codename}/{label}.npz", allow_pickle=True)['value']
+
+def kron4(A, B, C, D):
+    """Return the Kronecker product A ⊗ B ⊗ C ⊗ D."""
+    log.debug("kron4: operands shapes %s × %s × %s × %s", 
+              A.shape, B.shape, C.shape, D.shape)
+    return np.kron(np.kron(np.kron(A, B), C), D)
 
 def cached_kron4(label, delta, I1, I2, I3, codename):
     """Compute or load Kronecker product for a given delta and 3 identity blocks."""
