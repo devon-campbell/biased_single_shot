@@ -5,6 +5,7 @@ from bposd.stab import stab_code         # non-CSS stabiliser base class
 import scipy.sparse as sp
 import logging
 import time
+import os
 
 # ----------------------------------------------------------------------
 # logger setup (each file that imports this module gets the same logger)
@@ -36,11 +37,26 @@ def Z_cached(rows, cols):
         log.debug("Z_cached: created zeros(%d, %d)", rows, cols)
     return _zero_cache[key]
 
-def kron4(A, B, C, D):
-    """Return the Kronecker product A ⊗ B ⊗ C ⊗ D."""
-    log.debug("kron4: operands shapes %s × %s × %s × %s", 
-              A.shape, B.shape, C.shape, D.shape)
-    return np.kron(np.kron(np.kron(A, B), C), D)
+def save_matrix(proto, key, codename):
+    path = f"codes/{codename}"
+    os.makedirs(path, exist_ok=True)  # Create dir if needed
+    np.savez_compressed(f"{path}/{key}.npz", value=proto)
+
+def load_matrix(label, codename):
+    return np.load(f"codes/{codename}/{label}.npz", allow_pickle=True)['value']
+
+def cached_kron4(label, delta, I1, I2, I3, codename):
+    """Compute or load Kronecker product for a given delta and 3 identity blocks."""
+    fname = f"codes/{codename}/{label}.npz"
+    if os.path.exists(fname):
+        log.info(f"Loading {label} from cache")
+        return load_matrix(label, codename)
+    else:
+        log.info(f"Computing {label} from scratch")
+        mat = kron4(delta, I1, I2, I3)
+        save_matrix(mat, label, codename)
+        return mat
+
 
 def get_identities(delta_A, delta_B, delta_C, delta_D):
     """Return protograph‑type identity matrices that match the codomain size
@@ -53,19 +69,20 @@ def get_identities(delta_A, delta_B, delta_C, delta_D):
         I_cached(delta_D.shape[1]),
     )
 
-def get_blocks(delta_A, delta_B, delta_C, delta_D):
+def get_blocks(delta_A, delta_B, delta_C, delta_D, codename):
+    """
+    Computes or loads the 4 Kronecker blocks used in the 4D lifted HGP code.
+    """
     t0 = time.perf_counter()
     I_f, I_h, I_j, I_l = get_identities(delta_A, delta_B, delta_C, delta_D)
-    log.info('got identities')
-    A = kron4(delta_A, I_h, I_j, I_l)
-    log.info('got A')
-    B = kron4(I_f, delta_B, I_j, I_l)
-    log.info('got B')
-    C = kron4(I_f, I_h, delta_C, I_l)
-    log.info('got C')
-    D = kron4(I_f, I_h, I_j, delta_D)
-    log.info('got D')
-    log.debug("get_blocks: built A,B,C,D in %.3f s", time.perf_counter()-t0)
+    log.info("Got identity matrices")
+
+    A = cached_kron4("A", delta_A, I_h, I_j, I_l, codename)
+    B = cached_kron4("B", delta_B, I_f, I_j, I_l, codename)
+    C = cached_kron4("C", delta_C, I_f, I_h, I_l, codename)
+    D = cached_kron4("D", delta_D, I_f, I_h, I_j, codename)
+
+    log.info("Constructed A, B, C, D in %.3f seconds", time.perf_counter() - t0)
     return A, B, C, D
 
 def construct_HZ(A, B, C, D):
@@ -123,6 +140,33 @@ def construct_MZ(A, B, C, D):
 def construct_MX(A, B, C, D):
     return pt.array(pt.hstack([D, C, B, A]))
 
+def maybe_cached(label, codename, compute_fn):
+    """Loads matrix from cache if available, otherwise computes and saves it."""
+    path = f"codes/{codename}/{label}.npz"
+    if os.path.exists(path):
+        log.info(f"Loading {label} from cache")
+        return load_matrix(label, codename)
+    else:
+        log.info(f"Computing {label} from scratch")
+        result = compute_fn()
+        save_matrix(result, label, codename)
+        return result
+
+def construct_4d_matrices(delta_A, delta_B, delta_C, delta_D, codename="code"):
+    A, B, C, D = get_blocks(delta_A, delta_B, delta_C, delta_D, codename)
+    log.info("Got Kronecker blocks A–D")
+
+    mz_proto = maybe_cached("mz", codename, lambda: construct_MZ(A, B, C, D))
+    hz1_proto = maybe_cached("hz1", codename, lambda: construct_HZ(A, B, C, D)[0])
+    hz2_proto = maybe_cached("hz2", codename, lambda: construct_HZ(A, B, C, D)[1])
+    hx1_proto = maybe_cached("hx1", codename, lambda: construct_HX(A, B, C, D)[0])
+    hx2_proto = maybe_cached("hx2", codename, lambda: construct_HX(A, B, C, D)[1])
+    mx_proto  = maybe_cached("mx", codename, lambda: construct_MX(A, B, C, D))
+
+    log.info("Constructed all 4D matrices")
+
+    return mz_proto, hz1_proto, hz2_proto, hx1_proto, hx2_proto, mx_proto
+
 def split_cols(mat):
     mid = mat.shape[1] // 2
     return mat[:, :mid], mat[:, mid:]
@@ -141,19 +185,6 @@ def H_commute(hx, hz):
 def MHHM_commute(mz, hz, hx, mx):
     combo = (mx @ hx @ hz.T @ mz.T).toarray() % 2
     return combo.sum() == 0
-def construct_4d_matrices(delta_A, delta_B, delta_C, delta_D):
-    A, B, C, D = get_blocks(delta_A, delta_B, delta_C, delta_D)
-    log.info("got blocks")
-    mz_proto = construct_MZ(A, B, C, D)
-    log.info("mz done")
-    hz1_proto, hz2_proto = construct_HZ(A, B, C, D)
-    log.info("hz done")
-    hx1_proto, hx2_proto = construct_HX(A, B, C, D)
-    log.info("hx done")
-    mx_proto = construct_MX(A, B, C, D)
-    log.info("mx done")
-    
-    return mz_proto, hz1_proto, hz2_proto, hx1_proto, hx2_proto, mx_proto
 
 def split_cols(mat):
     """Split a protograph matrix into left and right halves along columns."""
@@ -204,7 +235,7 @@ class lifted_hgp_4d(css_code):
     builds 4D chain-complex operators.
     """
 
-    def __init__(self, lift_parameter, a, b, c, d, *, verbose=False):
+    def __init__(self, lift_parameter, a, b, c, d, codename, *, verbose=False):
         """
         Generates the 2D lifted hypergraph product of protographs a, b,
         and then constructs the 4D product operators from them.
@@ -224,7 +255,7 @@ class lifted_hgp_4d(css_code):
         t0 = time.perf_counter()
         self.mz_proto, self.hz1_proto, self.hz2_proto, \
             self.hx1_proto, self.hx2_proto, self.mx_proto = \
-                construct_4d_matrices(a, b, c, d)
+                construct_4d_matrices(a, b, c, d, codename)
         log.info("  protograph assembly done in %.2f s", time.perf_counter()-t0)
 
 
@@ -266,14 +297,6 @@ class lifted_hgp_4d(css_code):
     @property
     def hz2(self):
         return self.hz2_proto.to_binary(self.lift_parameter)
-
-    # @property
-    # def mx(self):
-    #     return sp.csr_matrix(self.mx_proto.to_binary(self.lift_parameter))
-    
-    # @property
-    # def mz(self):
-    #     return sp.csr_matrix(self.mz_proto.to_binary(self.lift_parameter))
 
 # ────────────────────────────────────────────────────────────────────────────
 #  Bias-tailored 4-D Lifted HGP code with XZZX-style Hadamard twist
@@ -359,5 +382,3 @@ class bias_tailored_lhp_4d(stab_code):
     def hz1_proto(self): return self.hz_proto[: , : self.hz_proto.shape[1]//2]
     @property
     def hz2_proto(self): return self.hz_proto[: ,  self.hz_proto.shape[1]//2 :]
-
-
