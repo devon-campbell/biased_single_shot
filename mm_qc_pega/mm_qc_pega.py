@@ -8,68 +8,85 @@ import time
 import graphs 
 import peg_utils
 import os
+from tqdm import tqdm
+import math
+
+def two_point_lam(n, m, rho_node):
+    deg_CN = sum((i+1)*w for i, w in enumerate(rho_node))
+    d_avg  = (m * deg_CN) / n
+    d_hi   = math.ceil(d_avg)
+    d_lo   = d_hi - 1
+    w_hi   = d_avg - d_lo
+    w_lo   = 1 - w_hi
+    lam    = [0.0] * d_hi
+    lam[d_lo - 1] = w_lo
+    lam[d_hi - 1] = w_hi
+    return np.array(lam)
+
+def two_point_rho(n, m, lam_node, epsilon=1e-4):
+    d_avg_vn = sum((i + 1) * w for i, w in enumerate(lam_node))
+    d_avg_cn = (n * d_avg_vn) / m
+
+    d_hi = math.ceil(d_avg_cn)
+    d_lo = d_hi - 1
+    w_hi = d_avg_cn - d_lo
+    w_lo = 1 - w_hi
+
+    rho = [0.0] * d_hi
+    rho[d_lo - 1] = w_lo
+    rho[d_hi - 1] = w_hi
+
+    # Clean up tiny entries
+    rho = np.array(rho)
+    rho[rho < epsilon] = 0.0
+
+    # Renormalize to ensure sum = 1
+    total = rho.sum()
+    if not np.isclose(total, 1.0):
+        rho = rho / total
+
+    return np.trim_zeros(rho, 'b')
 
 #Load settings
-try:
-    with open("config.yml", "r") as ymlfile:
-        settings = yaml.safe_load(ymlfile)
-        # data = np.load(settings["input_fname"])
-        # data = {
-        #     "lam_node": np.array([0, 0, 1]),  # 100% of VNs have degree 3
-        #     "rho_node": np.array([0, 0, 0, 0, 0, 1])  # 100% of CNs have degree 6
-        # }
-        data = {
-            "lam_node": np.array([0, 0, 1]),   # all VN degree 3
-            "rho_node": np.array([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]) # all CN degree 25
-        }
+with open("config.yml", "r") as ymlfile:
+    settings = yaml.safe_load(ymlfile)
+    lam_node_cfg = settings["lam_node"]
+    rho_node_cfg = settings["rho_node"]
 
+m, n, scaling_factor = settings["m"], settings["n"], settings["scaling_factor"]
+print(lam_node_cfg, type(lam_node_cfg))
+print(rho_node_cfg, type(rho_node_cfg))
 
-except:
-    print("Config or input data not found, using default settings.")
-    settings = {
-                "n" : 73,
-                "m" : 9,
-                "scaling_factor" : 4,
-                "girth_search_depth" : 1,
-                "seed" : 'None',
-                "gcd" : False,
-                "input_fname" : None,
-                "output_fname" : "test.qc"
-                }
-    data = {
-            "vn_degree_node" : np.array([0,1]),
-            "cn_degree_node" : np.array([0,0,0,0,0,0,0,0,0,1/9,0,0,0,0,0,0,8/9])
-            } 
-
+if lam_node_cfg is not None:
+    print('Building rho_node')
+    lam_node =  np.array(lam_node_cfg)
+    rho_node = two_point_rho(n, m, lam_node_cfg, epsilon=1e-4)
+elif rho_node_cfg is not None:
+    print('Building lam_node')
+    rho_node =  np.array(rho_node_cfg)
+    lam_node = two_point_lam(n, m, rho_node_cfg)
 
 header = f"""
 ===================================================================
-Creating ({settings["m"]},{settings["n"]},{settings["scaling_factor"]}) code with the {settings["girth_search_depth"]}-edge QC-PEGA algorithm for 
+Creating ({m},{n},{scaling_factor}) code with the {settings["girth_search_depth"]}-edge QC-PEGA algorithm for 
 variable node edge distribution.
-Input file: {settings["input_fname"]}
+lam_node: {lam_node}
+rho_node: {rho_node}
 Output file: {settings["output_fname"]}
 ===================================================================
 """
 print(header)
-G = graphs.QC_tanner_graph(settings["m"], settings["n"], settings["scaling_factor"])
-#vn_degrees = peg_utils.to_degree_distribution(data["vn_degree_node"], G.n_vn)
-#cn_degrees = peg_utils.to_degree_distribution(data["cn_degree_node"], G.n_cn)
+G = graphs.QC_tanner_graph(m, n, scaling_factor)
 
 # Get the node perspective degree distributions from density evolution optimization
-lam_node = data["lam_node"]
-rho_node = data["rho_node"]
 vn_degrees = np.flip(peg_utils.to_degree_distribution(lam_node,G.n_vn))
 cn_degrees = peg_utils.to_degree_distribution(rho_node,G.n_cn)
-
-#vn_degrees = np.repeat(vn_degrees, settings["scaling_factor"])
-#cn_degrees = np.repeat(cn_degrees, settings["scaling_factor"])
 
 if not settings["seed"] == 'None':
     np.random.seed(int(settings["seed"]))
 t0 = time.time()
 
-for current_vn_index in range(0, G.n_vn, G.N):
-
+for current_vn_index in tqdm(range(0, G.n_vn, G.N), desc="Building Tanner graph"):
     d = vn_degrees[current_vn_index]
     for k in range(1, int(d+1)):
         rk = int(min(settings["girth_search_depth"], d - k +1))

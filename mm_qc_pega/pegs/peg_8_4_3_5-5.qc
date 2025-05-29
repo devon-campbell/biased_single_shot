@@ -7,7 +7,7 @@
 
 # QC-code generated with the r-edge metric constrained QC-PEG algorithm.
 # 
-# Name   : test.qc
+# Name   : pegs/peg_8_4_3.qc
 # R      : 4
 # Metric : Minimum distance
-# Date   : 2025-05-04 20:12:38.735749
+# Date   : 2025-05-05 00:08:09.628198

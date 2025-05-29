@@ -8,14 +8,15 @@ This implementation has support for a general search depth, but it only cacluate
 mm_qc_pega.py is the main program, reading settings from config.yml.
 
 Input parameters:
-    n : 73  #Number of variable nodes (columns) in protograph
-    m : 9   #Number of check nodes (rows) in protograph
-    scaling_factor : 8  #Scaling of the protograph, often refered to as N
-    girth_search_depth : 1 #Maximum depth of the DFS search algorithm to calculate potential girth
+    n : 7  #Number of variable nodes (columns) in protograph
+    m : 5   #Number of check nodes (rows) in protograph
+    scaling_factor : 3  #Scaling of the protograph, often refered to as N
+    girth_search_depth : 4 #Maximum depth of the DFS search algorithm to calculate potential girth
     seed : None #Randomness seed, set to None to pick a new one every time.
-    input_fname : "../density_evolution/data/test.npz" #Input from the density_evolution_script.
-    output_fname : "test.qc" #Output file useable with aff3ct
-
+    lam_node: [0, 0, 1]         # all VNs degree 3
+    rho_node:   # all CNs degree 6
+    output_fname : "pegs/peg_7_5_3_0-1.qc"
+    
 Output:
 A .qc specifying a QC-LDPC file with large local girths, readable by the qc2sparse.m script https://github.com/Lcrypto/Algebraic_QC-LDPC, 5G simulation tool https://github.com/Lcrypto/Simple-platform-to-Study-5G-LDPC-codes-and-decoders or C++ ECC library Aff3ct  https://aff3ct.github.io/ .
 

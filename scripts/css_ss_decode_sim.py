@@ -6,56 +6,10 @@ import datetime
 from ldpc import BpOsdDecoder
 from bposd.css import css_code
 import scipy
+from lifted_hgp_4d import *
+from collections import Counter
 
 class css_ss_decode_sim:
-    """
-    A class for simulating BP+OSD decoding of CSS codes
-
-    Note
-    ....
-    The input parameters can be entered directly or as a dictionary.
-
-    Parameters
-    ----------
-
-    hx: numpy.ndarray
-        The hx matrix of the CSS code.
-    hz: numpy.ndarray
-        The hz matrix of the CSS code.
-    error_rate: float
-        The physical error rate on each qubit.
-    xyz_error_bias: list of ints
-        The relative bias for X, Y and Z errors.
-    seed: int
-        The random number generator seed.
-    target_runs: int
-        The number of runs you wish to simulate.
-    bp_method: string
-        The BP method. Choose either: 1) "minimum_sum"; 2) "product_sum".
-    ms_scaling_factor: float
-        The minimum sum scaling factor (if applicable)
-    max_iter: int
-        The maximum number of iterations for BP.
-    osd_method: string
-        The OSD method. Choose from: 1) "osd_cs"; 2) "osd_e"; 3) "osd0".
-    channel_update: string
-        The channel update method. Choose form: 1) None; 2) "x->z"; 3) "z->x".
-    output_file: string
-        The output file to write to.
-    save_interval: int
-        The time in interval (in seconds) between writing to the output file.
-    check_code: bool
-        Check whether the CSS code is valid.
-    tqdm_disable: bool
-        Enable/disable the tqdm progress bar. If you are running this script on a HPC
-        cluster, it is recommend to disable tqdm.
-    run_sim: bool
-        If enabled (default), the simulation will start automatically.
-
-    error_bar_precision_cutoff: float
-        The simulation will stop after this precision is reached.
-    """
-
     def __init__(self, hx=None, hz=None, mx=None, mz=None, **input_dict):
         # default input values
         default_input = {
@@ -74,11 +28,14 @@ class css_ss_decode_sim:
             "tqdm_disable": 0,
             "run_sim": 1,
             "channel_update": "x->z",
-            "sector_list": [0, 1, 2],
-            "rotated_sectors": [],
-            "sector_lengths": {0:0, 1:0, 2:0},
+            "hadamard_rotate": False,
+            "hadamard_rotate_sector1_length": 0,
+            "run_ss": False, # when True, meas errs occur
+            "apply_ss": True, # when True (and run_ss is True), attempt to apply corrections based on metachecks
             "p_meas_err": 0,
             "error_bar_precision_cutoff": 1e-3,
+            "run_sustained": False,      # run the sustained-threshold experiment?
+            "sustained_threshold_depth": 4,  # how many repeated measurement rounds to do
         }
 
         # apply defaults for keys not passed to the class
@@ -141,7 +98,7 @@ class css_ss_decode_sim:
         self.hx = scipy.sparse.csr_matrix(hx).astype(np.uint8)
         self.hz = scipy.sparse.csr_matrix(hz).astype(np.uint8)
 
-        print(type(mx))
+        # print(type(mx))
         self.mx = scipy.sparse.csr_matrix(mx).astype(np.uint8)
         self.mz = scipy.sparse.csr_matrix(mz).astype(np.uint8)
         self.N = self.hz.shape[1]  # the block length
@@ -165,10 +122,6 @@ class css_ss_decode_sim:
             self.run_decode_sim()
 
     def _single_run(self):
-        """
-        The main simulation procedure
-        """
-
         # randomly generate the error
         self.error_x, self.error_z = self._generate_error()
 
@@ -209,63 +162,117 @@ class css_ss_decode_sim:
         self._encoded_error_rates()
 
     def _single_run_ss(self):
-        """
-        Single-run single-shot simulation that includes an extra "meta-check" 
-        step for measurement error correction using (mz, hz, hx, mx).
-        """
-    
-        # 1) Generate data errors (just as before)
+        # ─────────────────────────────────────────────────────────────────────
+        # 1) Generate physical data error
         self.error_x, self.error_z = self._generate_error()
     
-        # 2) Compute the *ideal* data syndromes
-        #    (Using the 4D hz / hx that you built)
+        # 2) Compute ideal syndromes
         synd_x_ideal = (self.hz @ self.error_x) % 2
         synd_z_ideal = (self.hx @ self.error_z) % 2
     
         # 3) Add measurement noise
-        synd_x_noisy = (synd_x_ideal + np.random.binomial(1, self.p_meas_err, size=len(synd_x_ideal))) % 2
-        synd_z_noisy = (synd_z_ideal + np.random.binomial(1, self.p_meas_err, size=len(synd_z_ideal))) % 2
+        synd_x_noisy = (synd_x_ideal + np.random.binomial(1, self.p_meas_err, len(synd_x_ideal))) % 2
+        synd_z_noisy = (synd_z_ideal + np.random.binomial(1, self.p_meas_err, len(synd_z_ideal))) % 2
     
-        # 4) Form meta-syndrome by measuring the noisy syndrome using mx / mz:
+        # Flags for actual measurement errors (any syndrome bit flipped)
+        err_meas_x = not np.array_equal(synd_x_ideal, synd_x_noisy)
+        err_meas_z = not np.array_equal(synd_z_ideal, synd_z_noisy)
+    
+        # ─────────────────────────────────────────────────────────────────────
+        # 4) Compute meta-syndromes
         meta_synd_x = (self.mx @ synd_x_noisy) % 2
         meta_synd_z = (self.mz @ synd_z_noisy) % 2
     
-        # 5) Decode the meta-syndrome to find which measurement bits are flipped
-        #    (i.e. run the "measurement" decoders)
-        meas_err_correction_x = self.bpd_meas_x.decode(meta_synd_x)
-        meas_err_correction_z = self.bpd_meas_z.decode(meta_synd_z)
+        det_x = np.any(meta_synd_x)
+        det_z = np.any(meta_synd_z)
     
-        # 6) Apply that correction to get a "corrected" data syndrome
+        # ─────────────────────────────────────────────────────────────────────
+        # 5) Decode measurement layer
+        self.bpd_meas_x.decode(meta_synd_x)
+        self.bpd_meas_z.decode(meta_synd_z)
+    
+        meas_err_correction_x = self.bpd_meas_x.osdw_decoding
+        meas_err_correction_z = self.bpd_meas_z.osdw_decoding
+    
+        # 6) Apply the correction
         synd_x_corrected = (synd_x_noisy + meas_err_correction_x) % 2
         synd_z_corrected = (synd_z_noisy + meas_err_correction_z) % 2
+
+        synd_x_corrected = synd_x_corrected if self.apply_ss else synd_x_noisy
+        synd_x_corrected = synd_x_corrected if self.apply_ss else synd_z_noisy
     
-        # 7) Decode the corrected syndromes
+        fix_x = np.array_equal(synd_x_corrected, synd_x_ideal)
+        fix_z = np.array_equal(synd_z_corrected, synd_z_ideal)
+    
+        # ─────────────────────────────────────────────────────────────────────
+        # 7) Decode corrected syndromes for data error
         if self.channel_update is None:
-            # Decode Z first (no channel update afterwards, since there's no second pass), then decode X
             self.bpd_z.decode(synd_z_corrected)
             self.bpd_x.decode(synd_x_corrected)
-    
         elif self.channel_update == "z->x":
-            # Decode Z first
             self.bpd_z.decode(synd_z_corrected)
-            # Update channel probabilities
             self._channel_update("z->x")
-            # Decode X
             self.bpd_x.decode(synd_x_corrected)
-    
         elif self.channel_update == "x->z":
-            # Decode X first
             self.bpd_x.decode(synd_x_corrected)
-            # Update channel probabilities
             self._channel_update("x->z")
-            # Decode Z
             self.bpd_z.decode(synd_z_corrected)
     
-        else:
-            raise ValueError(f"Invalid channel_update option: {self.channel_update}")
+        # 8) Evaluate final success/failure
+        logical_success = self._encoded_error_rates()
     
-        # 8) Evaluate success/failure as usual
-        self._encoded_error_rates()
+        # ─────────────────────────────────────────────────────────────────────
+        # Collect detailed summary statistics
+        if not hasattr(self, "stats"):
+            self.stats = Counter(trials=0,
+                                 TPx=0, FNx=0, FPx=0, TNx=0, TCx=0, MCx=0,
+                                 TPz=0, FNz=0, FPz=0, TNz=0, TCz=0, MCz=0,
+                                 logical_fail=0)
+    
+        S = self.stats
+        S["trials"] += 1
+    
+        # -- X syndrome stats
+        if err_meas_x and det_x:     S["TPx"] += 1
+        if err_meas_x and not det_x: S["FNx"] += 1
+        if not err_meas_x and det_x: S["FPx"] += 1
+        if not err_meas_x and not det_x: S["TNx"] += 1
+        if err_meas_x and fix_x:     S["TCx"] += 1
+        if det_x and not fix_x:      S["MCx"] += 1
+    
+        # -- Z syndrome stats
+        if err_meas_z and det_z:     S["TPz"] += 1
+        if err_meas_z and not det_z: S["FNz"] += 1
+        if not err_meas_z and det_z: S["FPz"] += 1
+        if not err_meas_z and not det_z: S["TNz"] += 1
+        if err_meas_z and fix_z:     S["TCz"] += 1
+        if det_z and not fix_z:      S["MCz"] += 1
+    
+        # -- Final logical success/failure
+        if not logical_success:
+            S["logical_fail"] += 1
+
+    def print_ss_summary(self):
+        S = self.stats
+        for basis in ("x", "z"):
+            TP = S[f"TP{basis}"]; FN = S[f"FN{basis}"]
+            FP = S[f"FP{basis}"]; TN = S[f"TN{basis}"]
+            TC = S[f"TC{basis}"]; MC = S[f"MC{basis}"]
+    
+            det_rate   = TP / (TP + FN) if TP+FN else 0.0
+            false_pos  = FP / (FP + TN) if FP+TN else 0.0
+            corr_rate  = TC / (TP + FN) if TP+FN else 0.0
+            miscorr    = MC / (TP + FP) if TP+FP else 0.0
+    
+            print(f"\n--- {basis.upper()} basis ---")
+            print(f"  measurement errors occurred : {TP+FN}")
+            print(f"  detection rate              : {det_rate:6.2%}")
+            print(f"  false-alarm rate            : {false_pos:6.2%}")
+            print(f"  correction success (TP)     : {corr_rate:6.2%}")
+            print(f"  mis-correction given detect : {miscorr:6.2%}")
+    
+        wer = S["logical_fail"] / S["trials"]
+        print(f"\nPost‑decode logical WER : {wer:6.2%}  (over {S['trials']} trials)")
     
     def _channel_update(self, update_direction):
         """
@@ -314,7 +321,6 @@ class css_ss_decode_sim:
         """
         Updates the logical and word error rates for OSDW, OSD0 and BP (before post-processing)
         """
-
         # OSDW Logical error rate
         # calculate the residual error
         residual_x = (self.error_x + self.bpd_x.osdw_decoding) % 2
@@ -436,11 +442,15 @@ class css_ss_decode_sim:
         if isinstance(self.hx, (np.ndarray, scipy.sparse.spmatrix)) and isinstance(
             self.hz, (np.ndarray, scipy.sparse.spmatrix)
         ):
+            print(f'h shapes: {self.hx.shape, self.hz.shape}')
             qcode = css_code(self.hx, self.hz)
             self.lx = qcode.lx
             self.lz = qcode.lz
+            print(f'l shapes: {self.lx.shape, self.lz.shape}')
             self.K = qcode.K
             self.N = qcode.N
+            print(f'K: {qcode.K}')
+            print(f'N: {qcode.N}')
             print("Checking the CSS code is valid...")
             if self.check_code and not qcode.test():
                 raise Exception(
@@ -454,10 +464,9 @@ class css_ss_decode_sim:
         """
         Sets up the error channels from the error rate and error bias input parameters
         """
-    
-        # SET UP ERR RATE FOR EACH PAULI (DEPENDING ON BIAS):
-        xyz_error_bias = np.array(self.xyz_error_bias)  # take in the tuple with (xbias, ybias, zbias)
-        if xyz_error_bias[0] == np.inf:                 # if infinite bias, that Pauli is the whole err rate (everything else = 0)
+
+        xyz_error_bias = np.array(self.xyz_error_bias)
+        if xyz_error_bias[0] == np.inf:
             self.px = self.error_rate
             self.py = 0
             self.pz = 0
@@ -469,36 +478,30 @@ class css_ss_decode_sim:
             self.px = 0
             self.py = 0
             self.pz = self.error_rate
-        else:                                           # otherwise, each Pauli gets the proportional error prob
+        else:
             self.px, self.py, self.pz = (
                 self.error_rate * xyz_error_bias / np.sum(xyz_error_bias)
             )
-    
-        # SET UP CHANNEL PROBS (DEPENDING ON H ROT)
-        if not self.rotated_sectors:       
-            # No sectors are rotated → apply uniform px, pz
-            self.channel_probs_x = np.ones(self.N) * self.px
-            self.channel_probs_z = np.ones(self.N) * self.pz
-            self.channel_probs_y = np.ones(self.N) * self.py
-        
+
+        if self.hadamard_rotate == 0:
+            self.channel_probs_x = np.ones(self.N) * (self.px)
+            self.channel_probs_z = np.ones(self.N) * (self.pz)
+            self.channel_probs_y = np.ones(self.N) * (self.py)
+
+        elif self.hadamard_rotate == 1:
+            n1 = self.hadamard_rotate_sector1_length
+            self.channel_probs_x = np.hstack(
+                [np.ones(n1) * (self.px), np.ones(self.N - n1) * (self.pz)]
+            )
+            self.channel_probs_z = np.hstack(
+                [np.ones(n1) * (self.pz), np.ones(self.N - n1) * (self.px)]
+            )
+            self.channel_probs_y = np.ones(self.N) * (self.py)
         else:
-            # Some sectors are rotated → build channel_probs accordingly
-            x_probs, z_probs = [], []
-            for i in range(len(self.sector_lengths)):  # supports any number of sectors
-                n = self.sector_lengths[i]
-                if i in self.rotated_sectors:
-                    # Hadamard-rotated sector: swap px ↔ pz
-                    x_probs.append(np.ones(n) * self.pz)
-                    z_probs.append(np.ones(n) * self.px)
-                else:
-                    # Unrotated sector: standard assignment
-                    x_probs.append(np.ones(n) * self.px)
-                    z_probs.append(np.ones(n) * self.pz)
-        
-            self.channel_probs_x = np.hstack(x_probs)
-            self.channel_probs_z = np.hstack(z_probs[::-1]) # mirror, due to mirrored sector structure for Hz
-            self.channel_probs_y = np.ones(self.N) * self.py
-    
+            raise ValueError(
+                f"The hadamard rotate attribute should be set to 0 or 1. Not '{self.hadamard_rotate}"
+            )
+
         self.channel_probs_x.setflags(write=False)
         self.channel_probs_y.setflags(write=False)
         self.channel_probs_z.setflags(write=False)
@@ -540,11 +543,10 @@ class css_ss_decode_sim:
             self.bpd_meas_x = BpOsdDecoder(
                 self.mx,
                 channel_probs=meas_err_probs_x,
-                max_iter=self.max_iter,
-                bp_method=self.bp_method,
+                max_iter=3,
+                bp_method="product_sum",   
                 ms_scaling_factor=self.ms_scaling_factor,
-                osd_method=self.osd_method,
-                osd_order=self.osd_order
+                osd_order=0
             )
     
         if self.mz is not None and self.mz.shape[0] != 0:
@@ -552,12 +554,13 @@ class css_ss_decode_sim:
             self.bpd_meas_z = BpOsdDecoder(
                 self.mz,
                 channel_probs=meas_err_probs_z,
-                max_iter=self.max_iter,
-                bp_method=self.bp_method,
+                max_iter=3,
+                bp_method="product_sum",   
                 ms_scaling_factor=self.ms_scaling_factor,
-                osd_method=self.osd_method,
-                osd_order=self.osd_order
+                osd_order=0
             )
+
+
 
     def _generate_error(self):
         """
@@ -614,8 +617,12 @@ class css_ss_decode_sim:
         save_time = start_time
 
         for self.run_count in pbar:
-            self._single_run_ss()
-            # self._single_run()
+            if self.run_sustained:
+                self._single_run_sustained()   
+            elif self.run_ss:
+                self._single_run_ss()
+            else:
+                self._single_run()
 
             pbar.set_description(
                 f"d_max: {self.min_logical_weight}; OSDW_WER: {self.osdw_word_error_rate*100:.3g}±{self.osdw_word_error_rate_eb*100:.2g}%; OSDW: {self.osdw_logical_error_rate*100:.3g}±{self.osdw_logical_error_rate_eb*100:.2g}%; OSD0: {self.osd0_logical_error_rate*100:.3g}±{self.osd0_logical_error_rate_eb*100:.2g}%;"
@@ -650,6 +657,8 @@ class css_ss_decode_sim:
                     )
                     break
 
+        if self.run_ss or self.run_sustained:
+            self.print_ss_summary()
         return json.dumps(self.output_dict(), sort_keys=True, indent=4)
 
     def output_dict(self):
